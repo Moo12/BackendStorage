@@ -38,6 +38,7 @@ async def upload_image(
     file: UploadFile = File(...),
     authorization: str = Header(None)
 ):
+    print("upload callback")
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
