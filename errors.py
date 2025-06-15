@@ -21,9 +21,14 @@ ERROR_CODES = {
         "message": "User not found",
         "http": 404  # Not Found
     },
-    "INVALID_IMAGE": {
+    "INVALID_MEDIA_TYPE": {
         "code": 1005,
-        "message": "Uploaded file is not a valid image",
+        "message": "Uploaded file is not a valid media type",
+        "http": 400  # Bad Request
+    },
+    "VIDEO_TOO_LARGE": {
+        "code": 1010,
+        "message": "Uploaded video exceeds allowed size",
         "http": 400  # Bad Request
     },
     "IMAGE_TOO_LARGE": {

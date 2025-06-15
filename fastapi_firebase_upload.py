@@ -9,6 +9,7 @@ import imghdr
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from typing import Tuple, Optional
 import logging
 import re
 from errors  import raise_error
@@ -41,6 +42,21 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 
 db = firestore.Client()
+
+# --- Global Constants for Media Handling ---
+VALID_IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
+VALID_VIDEO_EXTENSIONS = ['.mp4', '.mov', '.avi', '.webm', '.mkv']
+VALID_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+VALID_VIDEO_MIMES = ['video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/webm', 'video/x-matroska']
+
+# Retrieve max sizes from environment variables, with defaults
+MAX_IMAGE_SIZE_MB = int(os.environ.get("MAX_IMAGE_SIZE_MB", 5)) # Default 5 MB for images
+MAX_VIDEO_SIZE_MB = int(os.environ.get("MAX_VIDEO_SIZE_MB", 100)) # Default 100 MB for videos
+
+# Convert to bytes
+MAX_IMAGE_SIZE_BYTES = MAX_IMAGE_SIZE_MB * 1024 * 1024
+MAX_VIDEO_SIZE_BYTES = MAX_VIDEO_SIZE_MB * 1024 * 1024
+# --- End Global Constants ---
 
 def ensure_admin_role(uid: str):
     user_data = db.collection("users").document(uid).get()
@@ -87,7 +103,7 @@ async def upload_site_image(
 
     print(f"general dir {general_dir}")
 
-    saved_filename = await validate_and_save_image(file, general_dir)
+    saved_filename, media_type = await validate_and_save_media(file, general_dir)
 
     rel_dir = get_image_relative_dir(request, "general")
 
@@ -121,20 +137,22 @@ async def upload_image(
 
     wish_dir = get_file_path(request, uid, wish_id)
 
-    logging.info(f"uid dir {wish_dir}")
+    print(f"uid dir {wish_dir}")
 
     MAX_IMAGES_PER_WISH = int(os.environ.get("MAX_IMAGES_PER_WISH", 5))
 
-    if (await count_images_files_in_dir(wish_dir) >= MAX_IMAGES_PER_WISH):
+    if (await count_media_files_in_dir(wish_dir) >= MAX_IMAGES_PER_WISH):
         raise_error("LIMIT_REACHED")
     
-    saved_filename = await validate_and_save_image(file, wish_dir)
+    saved_filename, media_type = await validate_and_save_media(file, wish_dir)
+
+
 
     rel_dir = get_image_relative_dir(request, uid, wish_id)
 
     return JSONResponse({
         "success": True,
-        "filename": file.filename,
+        "filename": saved_filename,
         "uid": uid,
         "url": f"/uploads/{rel_dir}/{saved_filename}",  # This will be a direct link to the image
         "max_images": MAX_IMAGES_PER_WISH
@@ -204,91 +222,170 @@ def remove_file(file_path):
         logging.exception(f"delete file error {str(e)}")
         raise_error("DELETE_FAILED")
 
-async def is_valid_image(file: UploadFile) -> bool:
-    # Check extension
-    print("203")
-
-    valid_exts = ['.jpg', '.jpeg', '.png', '.gif']
-    ext = Path(file.filename).suffix.lower()
-    if ext not in valid_exts:
-        return False
-    
-    # Check MIME
-    mime = file.content_type.lower()
-    if not mime.startswith('image/'):
-        return False
-    
-    # Read first 512 bytes to check content
-    file.file.seek(0)
-    head = await file.read(512)
-    file.file.seek(0)
-
-    kind = imghdr.what(None, head)
-    return kind in ['jpeg', 'png', 'gif']
-
-async def count_images_files_in_dir(folder_path: str) -> int:
+async def is_valid_media_type(file: UploadFile) -> Tuple[bool, Optional[str]]:
     """
-    Count the number of valid image files in a given directory.
+    Checks if the uploaded file is a valid image or video based on its MIME type and extension.
+
+    Args:
+        file (UploadFile): The uploaded file object.
+
+    Returns:
+        tuple[bool, str | None]: (True if valid, media type category 'image'/'video' or None)
+    """
+    # Check extension first
+    ext = Path(file.filename).suffix.lower()
+    mime = file.content_type.lower()
+    
+    is_image_ext = ext in VALID_IMAGE_EXTENSIONS
+    is_video_ext = ext in VALID_VIDEO_EXTENSIONS
+    is_image_mime = mime in VALID_IMAGE_MIMES
+    is_video_mime = mime in VALID_VIDEO_MIMES
+
+    # Determine category based on MIME type primarily, then extension as fallback
+    media_category = None
+    if is_image_mime and not is_video_mime: # Explicitly image, not also video
+        media_category = 'image'
+    elif is_video_mime and not is_image_mime: # Explicitly video, not also image
+        media_category = 'video'
+    elif is_image_mime and is_video_mime: # Ambiguous MIME (unlikely for standard types)
+        # Fallback to extension if MIME is ambiguous
+        if is_image_ext and not is_video_ext:
+            media_category = 'image'
+        elif is_video_ext and not is_image_ext:
+            media_category = 'video'
+        else: # Still ambiguous or both (e.g., a file with '.mp4' extension but 'image/jpeg' MIME if spoofed)
+            logger.warning(f"Ambiguous media type for {file.filename}: MIME={mime}, Ext={ext}. Defaulting to None.")
+            return (False, None) # Consider it invalid if truly ambiguous
+    else: # MIME is not explicitly image or video
+        # Try to infer from extension if MIME is generic or unknown
+        if is_image_ext:
+            media_category = 'image'
+        elif is_video_ext:
+            media_category = 'video'
+        else:
+            return (False, None) # Neither valid MIME nor valid extension
+
+    # For images, perform a deeper content check using imghdr
+    if media_category == 'image':
+        file.file.seek(0)
+        head = await file.read(512)
+        file.file.seek(0) # Reset file pointer for subsequent reads
+        kind = imghdr.what(None, head)
+        if kind not in ['jpeg', 'png', 'gif']: # imghdr doesn't support webp, so rely on mime/ext for webp
+             if ext == '.webp': # Special case for webp which imghdr doesn't recognize
+                 if mime == 'image/webp':
+                     return (True, 'image')
+             return (False, None) # Not a valid image by content inspection (and not webp)
+        return (True, 'image')
+    elif media_category == 'video':
+        # For video, MIME and extension check is usually sufficient for common types
+        return (True, 'video')
+    
+    return (False, None) # Should ideally not be reached if logic is complete
+
+async def count_media_files_in_dir(folder_path: str) -> int:
+    """
+    Count the number of valid image and video files in a given directory.
 
     Args:
         folder_path (str): Path to the directory.
 
     Returns:
-        int: Number of valid image files.
+        int: Number of valid media files.
     """
     folder = Path(folder_path)
-    image_files = []
+    if not folder.exists():
+        return 0
 
+    media_files_count = 0
     for file_path in folder.iterdir():
         if file_path.is_file():
+            # Create a dummy UploadFile object for is_valid_media_type check
+            # This is a workaround as is_valid_media_type expects UploadFile.
+            # A more robust solution might refactor is_valid_media_type to take bytes/path.
             try:
-                with file_path.open("rb") as f:
-                    if await is_valid_image(f.read()):
-                        image_files.append(file_path.name)
+                # Read enough bytes for imghdr if it's an image
+                with open(file_path, "rb") as f:
+                    file_content_sample = f.read(512) # Read small sample for imghdr check
+                    f.seek(0) # Reset for potential full read if needed by future checks
+
+                # Simulate UploadFile attributes
+                temp_upload_file = UploadFile(
+                    filename=file_path.name,
+                    file=file_path.open("rb"), # Pass actual file handle
+                    headers={"content-type": "application/octet-stream"} # Placeholder, will be determined by is_valid_media_type
+                )
+                
+                # Try to guess mime type to pass to is_valid_media_type for better check
+                # This is a simplification; in a real scenario, you might infer MIME from extension
+                # or use a library like python-magic. For now, we rely on suffix for `is_valid_media_type`'s logic.
+                ext = file_path.suffix.lower()
+                if ext in VALID_IMAGE_EXTENSIONS:
+                    temp_upload_file.content_type = VALID_IMAGE_MIMES[0] if '.jpeg' in VALID_IMAGE_EXTENSIONS else "image/jpeg" # Arbitrary default
+                elif ext in VALID_VIDEO_EXTENSIONS:
+                    temp_upload_file.content_type = VALID_VIDEO_MIMES[0] if '.mp4' in VALID_VIDEO_EXTENSIONS else "video/mp4" # Arbitrary default
+                else:
+                     # If neither, it's unlikely to be valid media for our purpose, but let is_valid_media_type decide
+                     temp_upload_file.content_type = "application/octet-stream"
+
+                is_valid, _ = await is_valid_media_type(temp_upload_file)
+                temp_upload_file.file.close() # Close the file handle
+
+                if is_valid:
+                    media_files_count += 1
             except Exception as e:
-                logging.warning(f"Error reading file {file_path}: {e}")
+                logging.warning(f"Error checking file {file_path.name} for media type: {e}")
+                # This error means we couldn't even determine its type, so we don't count it.
+    
+    logging.info(f"Total valid media files in {folder_path}: {media_files_count}")
+    return media_files_count
 
-    logging.info(f"Valid image files: {image_files}")
-    return len(image_files)
-
-
-async def validate_and_save_image(file: UploadFile, dest_dir: str) -> str:
+async def validate_and_save_media(file: UploadFile, dest_dir: str) -> tuple[str, str]:
     """
-    Validate the uploaded image file and save it to the destination directory.
+    Validate the uploaded media file and save it to the destination directory.
 
     Args:
         file (UploadFile): The uploaded file.
         dest_dir (str): The destination directory path.
 
     Raises:
-        HTTPException: If the file is not a valid image or is too large.
+        HTTPException: If the file is not a valid media or is too large.
 
     Returns:
-        str: The safe filename of the saved image.
+        tuple[str, str]: (The safe filename of the saved media, the media type 'image' or 'video')
     """
-    MAX_IMAGE_SIZE_MB = int(os.environ.get("MAX_IMAGE_SIZE_MB", 5))
-    MAX_FILE_SIZE_BYTES = MAX_IMAGE_SIZE_MB * 1024 * 1024
+    is_valid, media_type = await is_valid_media_type(file)
 
-    content = await file.read()
+    if not is_valid or media_type is None:
+        raise_error("INVALID_MEDIA_TYPE") # Generic error for now
 
-    is_valid_image_res = await is_valid_image(file)
+    content = await file.read() # Read content AFTER type validation for safety and efficiency
 
-    # Validate image type
-    if not is_valid_image_res:
-        raise_error("INVALID_IMAGE")
+    file_size_bytes = len(content)
 
-    if len(content) > MAX_FILE_SIZE_BYTES:
+    if media_type == 'image' and file_size_bytes > MAX_IMAGE_SIZE_BYTES:
         raise_error("IMAGE_TOO_LARGE")
+    elif media_type == 'video' and file_size_bytes > MAX_VIDEO_SIZE_BYTES:
+        raise_error("VIDEO_TOO_LARGE")
+    elif media_type not in ['image', 'video']: # Should ideally be caught by is_valid_media_type, but a safeguard
+        raise_error("INVALID_MEDIA_TYPE")
 
-    safe_filename = Path(file.filename).name
+
+    safe_filename = Path(file.filename).name # Use original filename as safe name for simplicity
     file_location = os.path.join(dest_dir, safe_filename)
 
     os.makedirs(dest_dir, exist_ok=True)
 
-    with open(file_location, "wb") as f:
-        f.write(content)
+    try:
+        with open(file_location, "wb") as f:
+            f.write(content)
+        logging.info(f"Saved {media_type} file: {file_location}")
+    except OSError as e:
+        logging.exception(f"Failed to save file to disk: {file_location} - {str(e)}")
+        raise_error("FILE_SAVE_FAILED") # Raise the new error for file saving failure
 
-    return safe_filename
+    logging.info(f"Saved {media_type} file: {file_location}")
+    return safe_filename, media_type
 
 def authenticate_user(authorization: str):
     """
@@ -332,8 +429,9 @@ def get_file_path(request: Request, uid: str, wish_id: str = None, filename: str
     base_path.mkdir(parents=True, exist_ok=True)
 
     if filename:
-        return str(base_path / Path(filename).name)
+        base_path = base_path / Path(filename).name
 
+    print(f"path: {str(base_path)}")
     return str(base_path)
 
 def get_image_relative_dir(request: Request, uid: str, wish_id: str = None):
