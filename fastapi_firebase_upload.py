@@ -14,7 +14,6 @@ import logging
 import re
 from errors  import raise_error
 import asyncio
-import logging # Ensure logging is imported for app.on_event
 
 app = FastAPI()
 
@@ -63,14 +62,14 @@ def get_credentials_path_for_domain(domain_name: str) -> str:
         env_path = os.environ.get(env_var_name)
         
         if env_path:
-            print(f"Using environment variable {env_var_name} for domain {domain_name}: {env_path}")
+            logging.info(f"Using environment variable {env_var_name} for domain {domain_name}: {env_path}")
             return env_path
         else:
-            print(f"Environment variable {env_var_name} not found for domain {domain_name}, using fallback")
+            logging.info(f"Environment variable {env_var_name} not found for domain {domain_name}, using fallback")
     
     # Fallback to default credentials
     default_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "./serviceAccountKey.json")
-    print(f"Using default Firebase credentials for domain {domain_name}: {default_path}")
+    logging.info(f"Using default Firebase credentials for domain {domain_name}: {default_path}")
     return default_path
 
 async def initialize_firebase_for_domain(domain_name: str): # Made async
@@ -90,9 +89,9 @@ async def initialize_firebase_for_domain(domain_name: str): # Made async
     if not os.path.exists(cred_path):
         # Fallback to default credentials from env or generic path
         cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "./serviceAccountKey.json")
-        print(f"Warning: Domain-specific credentials not found for {domain_name}, using default: {cred_path}")
+        logging.info(f"Warning: Domain-specific credentials not found for {domain_name}, using default: {cred_path}")
         if not os.path.exists(cred_path):
-            print(f"Error: Default Firebase credential file not found at {cred_path}. Firebase initialization may fail.")
+            logging.error(f"Error: Default Firebase credential file not found at {cred_path}. Firebase initialization may fail.")
             # Depending on strictness, you might raise here, or let initialize_app fail
 
     # Use a lock to ensure only one Firebase initialization happens at a time
@@ -101,7 +100,7 @@ async def initialize_firebase_for_domain(domain_name: str): # Made async
         if _current_firebase_domain == domain_name and _current_firebase_cred_path == cred_path:
             return
         
-        print(f"Initializing Firebase for domain '{domain_name}' with credentials: {cred_path}")
+        logging.info(f"Initializing Firebase for domain '{domain_name}' with credentials: {cred_path}")
         
         try:
             # Delete existing app if it exists
@@ -117,11 +116,11 @@ async def initialize_firebase_for_domain(domain_name: str): # Made async
             _current_firebase_domain = domain_name
             _current_firebase_cred_path = cred_path
             
-            print(f"Firebase initialized successfully for domain: {domain_name}")
+            logging.info(f"Firebase initialized successfully for domain: {domain_name}")
         except Exception as e:
             # Crucial: If initialization fails here, the server state might be problematic.
             # Consider raising a specific exception or logging prominently.
-            print(f"Critical Error: Failed to initialize Firebase for domain {domain_name}: {e}")
+            logging.error(f"Critical Error: Failed to initialize Firebase for domain {domain_name}: {e}")
             raise # Re-raise to ensure the error is propagated
 
 # Initialize Firebase on application startup
@@ -217,7 +216,7 @@ async def upload_site_image(
     # For site images, we don't use uid (None), only the relative_path
     upload_dir = get_file_path(request, None, relative_path)
 
-    print(f"site image upload dir: {upload_dir}")
+    logging.info(f"site image upload dir: {upload_dir}")
 
     saved_filename, media_type = await validate_and_save_media(file, upload_dir)
 
@@ -257,11 +256,11 @@ async def upload_image(
 
     relative_path = form_data.get("wish_id") or relative_path
 
-    print(f"relative_path: {relative_path}")
+    logging.info(f"relative_path: {relative_path}")
 
     upload_dir = get_file_path(request, uid, relative_path)
 
-    print(f"upload dir {upload_dir}")
+    logger.info(f"upload dir {upload_dir}")
 
     MAX_IMAGES_PER_PATH = int(os.environ.get("MAX_IMAGES_PER_WISH", 5))
 
@@ -408,7 +407,7 @@ async def is_valid_media_type(file: UploadFile) -> Tuple[bool, Optional[str]]:
         elif is_video_ext and not is_image_ext:
             media_category = 'video'
         else: # Still ambiguous or both (e.g., a file with '.mp4' extension but 'image/jpeg' MIME if spoofed)
-            print(f"Ambiguous media type for {file.filename}: MIME={mime}, Ext={ext}. Defaulting to None.")
+            logging.info(f"Ambiguous media type for {file.filename}: MIME={mime}, Ext={ext}. Defaulting to None.")
             return (False, None) # Consider it invalid if truly ambiguous
     else: # MIME is not explicitly image or video
         # Try to infer from extension if MIME is generic or unknown
@@ -567,7 +566,7 @@ async def authenticate_user(authorization: str, request: Request = None):
             # Re-initialize Firebase for this specific domain
             await initialize_firebase_for_domain(domain_name)
         except Exception as e:
-            print(f"Warning: Could not initialize domain-specific Firebase for {domain_name}: {e}")
+            logging.info(f"Warning: Could not initialize domain-specific Firebase for {domain_name}: {e}")
             # Continue with existing Firebase instance
 
     id_token = authorization.split("Bearer ")[1]
@@ -597,7 +596,7 @@ def get_file_path(request: Request, uid: str = None, relative_path: str = None, 
     if filename:
         base_path = base_path / Path(filename).name
 
-    print(f"path: {str(base_path)}")
+    logging.info(f"path: {str(base_path)}")
     return str(base_path)
 
 def get_image_relative_dir(request: Request, uid: str, relative_path: str = None):
