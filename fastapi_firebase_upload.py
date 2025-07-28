@@ -34,6 +34,7 @@ async def catch_exceptions_middleware(request: Request, call_next):
     try:
         return await call_next(request)
     except HTTPException as http_exc:
+        logging.error(f"HTTPException: {http_exc.detail}")
         # Already well-structured FastAPI exception
         return JSONResponse(
             status_code=http_exc.status_code,
@@ -43,6 +44,7 @@ async def catch_exceptions_middleware(request: Request, call_next):
             }
         )
     except Exception as e:
+        logging.error(f"Exception: {e}")
         # Unexpected error
         return JSONResponse(
             status_code=500,
