@@ -13,6 +13,8 @@ from typing import Tuple, Optional
 import logging
 import re
 from errors  import raise_error
+import asyncio
+import logging # Ensure logging is imported for app.on_event
 
 app = FastAPI()
 
@@ -28,11 +30,116 @@ app.add_middleware(
 # Load environment variables from .env file
 load_dotenv()
 
-# Firebase Admin Init
-cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "./serviceAccountKey.json")
-if not firebase_admin._apps:
-    cred = credentials.Certificate(cred_path)
-    initialize_app(cred)
+# Global variable to track current domain and credentials
+_current_firebase_domain = None
+_current_firebase_cred_path = None
+_firebase_init_lock = asyncio.Lock() # New: Lock for initialization
+
+def get_credentials_path_for_domain(domain_name: str) -> str:
+    """
+    Get the appropriate Firebase credentials path based on the domain.
+    Uses environment variables with template FIREBASE_CONFIG_PATH_<appname>.
+    
+    Args:
+        domain_name (str): The domain name (e.g., "localhost:8081", "bon-orledet.org")
+        
+    Returns:
+        str: Path to the appropriate service account key file
+    """
+    # Map domains to their app names for environment variable lookup
+    domain_app_map = {
+        "localhost:8000": "webair",
+        "localhost:8082": "bon_orlyversaire", 
+        "bon-orledet.org": "bon_orlyversaire",
+        "iris-webair.com": "webair"
+    }
+    
+    # Get app name for the domain
+    app_name = domain_app_map.get(domain_name)
+    
+    if app_name:
+        # Try to get path from environment variable
+        env_var_name = f"FIREBASE_CONFIG_PATH_{app_name.upper()}"
+        env_path = os.environ.get(env_var_name)
+        
+        if env_path:
+            print(f"Using environment variable {env_var_name} for domain {domain_name}: {env_path}")
+            return env_path
+        else:
+            print(f"Environment variable {env_var_name} not found for domain {domain_name}, using fallback")
+    
+    # Fallback to default credentials
+    default_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "./serviceAccountKey.json")
+    print(f"Using default Firebase credentials for domain {domain_name}: {default_path}")
+    return default_path
+
+async def initialize_firebase_for_domain(domain_name: str): # Made async
+    """
+    Initialize Firebase Admin SDK with domain-specific credentials.
+    Handles multiple domains by reinitializing with different credentials.
+    Ensures thread-safe initialization.
+    
+    Args:
+        domain_name (str): The domain name to get appropriate credentials for
+    """
+    global _current_firebase_domain, _current_firebase_cred_path
+    
+    cred_path = get_credentials_path_for_domain(domain_name)
+    
+    # Check if the domain-specific credential file exists
+    if not os.path.exists(cred_path):
+        # Fallback to default credentials from env or generic path
+        cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "./serviceAccountKey.json")
+        print(f"Warning: Domain-specific credentials not found for {domain_name}, using default: {cred_path}")
+        if not os.path.exists(cred_path):
+            print(f"Error: Default Firebase credential file not found at {cred_path}. Firebase initialization may fail.")
+            # Depending on strictness, you might raise here, or let initialize_app fail
+
+    # Use a lock to ensure only one Firebase initialization happens at a time
+    async with _firebase_init_lock:
+        # Re-check inside the lock, as _current_firebase_domain might have changed
+        if _current_firebase_domain == domain_name and _current_firebase_cred_path == cred_path:
+            return
+        
+        print(f"Initializing Firebase for domain '{domain_name}' with credentials: {cred_path}")
+        
+        try:
+            # Delete existing app if it exists
+            if firebase_admin._apps:
+                for app_name in list(firebase_admin._apps.keys()):
+                    firebase_admin.delete_app(firebase_admin._apps[app_name])
+            
+            # Initialize with new credentials
+            cred = credentials.Certificate(cred_path)
+            initialize_app(cred)
+            
+            # Update global tracking
+            _current_firebase_domain = domain_name
+            _current_firebase_cred_path = cred_path
+            
+            print(f"Firebase initialized successfully for domain: {domain_name}")
+        except Exception as e:
+            # Crucial: If initialization fails here, the server state might be problematic.
+            # Consider raising a specific exception or logging prominently.
+            print(f"Critical Error: Failed to initialize Firebase for domain {domain_name}: {e}")
+            raise # Re-raise to ensure the error is propagated
+
+# Initialize Firebase on application startup
+@app.on_event("startup")
+async def startup_event():
+    # Attempt to initialize Firebase with a default domain on startup
+    # This ensures Firebase is ready even before the first request if a domain is known.
+    default_domain = os.environ.get("DEFAULT_FIREBASE_DOMAIN", "bon-orledet.org") # Or 'localhost:8081' for dev
+    try:
+        await initialize_firebase_for_domain(default_domain)
+    except Exception as e:
+        logging.error(f"Failed to initialize Firebase on startup for default domain {default_domain}: {e}")
+        # Depending on criticality, you might want to exit here if Firebase is essential
+        # sys.exit(1)
+
+# ... (rest of your FastAPI code from fastapi_firebase_upload.py) ...
+
+# Initialize Firebase with a default domain
 
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/var/www/uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -98,7 +205,7 @@ async def upload_site_image(
     Returns:
         JSONResponse: Success status, filename, and URL of uploaded image.
     """
-    uid = authenticate_user(authorization)
+    uid = await authenticate_user(authorization, request)
 
     ensure_admin_role(uid)
     
@@ -144,7 +251,7 @@ async def upload_image(
     """
     logging.info("upload callback")
 
-    uid = authenticate_user(authorization)
+    uid = await authenticate_user(authorization, request)
 
     form_data = await request.form()
 
@@ -193,7 +300,7 @@ async def delete_site_image(
     Returns:
         JSONResponse: Success status and deletion confirmation message.
     """
-    uid = authenticate_user(authorization)
+    uid = await authenticate_user(authorization, request)
 
     ensure_admin_role(uid)
     
@@ -232,7 +339,7 @@ async def delete_image(
     Returns:
         JSONResponse: Success status and deletion confirmation message.
     """
-    uid = authenticate_user(authorization)
+    uid = await authenticate_user(authorization, request)
 
     # Get form data and query parameters for backward compatibility
     form_data = await request.form()
@@ -434,12 +541,14 @@ async def validate_and_save_media(file: UploadFile, dest_dir: str) -> tuple[str,
     logging.info(f"Saved {media_type} file: {file_location}")
     return safe_filename, media_type
 
-def authenticate_user(authorization: str):
+async def authenticate_user(authorization: str, request: Request = None):
     """
         Verify the Firebase ID token from the Authorization header and return the user ID.
+        Uses domain-specific Firebase credentials if request is provided.
 
         Args:
             authorization (str): The 'Authorization' header value expected to be 'Bearer <token>'.
+            request (Request, optional): The incoming HTTP request to determine domain.
 
         Raises:
             HTTPException: If the authorization header is missing or malformed.
@@ -450,6 +559,16 @@ def authenticate_user(authorization: str):
     """
     if not authorization or not authorization.startswith("Bearer "):
         raise_error("MISSING_AUTH")
+
+    # Initialize Firebase with domain-specific credentials if request is provided
+    if request:
+        domain_name = get_safe_domain_name(request)
+        try:
+            # Re-initialize Firebase for this specific domain
+            await initialize_firebase_for_domain(domain_name)
+        except Exception as e:
+            print(f"Warning: Could not initialize domain-specific Firebase for {domain_name}: {e}")
+            # Continue with existing Firebase instance
 
     id_token = authorization.split("Bearer ")[1]
     try:
