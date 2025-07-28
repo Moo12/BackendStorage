@@ -60,7 +60,9 @@ def get_credentials_path_for_domain(domain_name: str) -> str:
         "localhost:8000": "webair",
         "localhost:8082": "bon_orlyversaire", 
         "bonorledet.org": "bon_orlyversaire",
-        "iriswebair.com": "webair"
+        "bon-orledet.org": "bon_orlyversaire",
+        "iriswebair.com": "webair",
+        "iris-webair.com": "webair"
     }
     
     # Get app name for the domain
