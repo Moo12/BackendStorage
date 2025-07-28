@@ -29,28 +29,77 @@ logging.basicConfig(
 
 app = FastAPI()
 
+# Global exception handlers
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    logging.error(f"HTTPException: {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            
+            "detail": exc.detail
+        },
+        headers={"Content-Type": "application/json"}
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    logging.error(f"Unexpected Exception: {str(exc)}")
+    logging.error(f"Traceback: {traceback.format_exc()}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error_code": "INTERNAL_SERVER_ERROR",
+            "message": "Internal server error",
+            "detail": str(exc) if os.environ.get("DEBUG", "false").lower() == "true" else "An unexpected error occurred"
+        },
+        headers={"Content-Type": "application/json"}
+    )
+
 @app.middleware("http")
 async def catch_exceptions_middleware(request: Request, call_next):
+    import uuid
+    request_id = str(uuid.uuid4())
+    
+    # Add request ID to headers for tracking
+    request.headers.__dict__["_list"].append((b"x-request-id", request_id.encode()))
+    
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        # Add request ID to response headers
+        response.headers["X-Request-ID"] = request_id
+        return response
     except HTTPException as http_exc:
-        logging.error(f"HTTPException: {http_exc.detail}")
-        # Already well-structured FastAPI exception
+        logging.error(f"[{request_id}] HTTPException: {http_exc.detail}")
+        # Return JSON response with proper headers
         return JSONResponse(
             status_code=http_exc.status_code,
-            content=http_exc.detail if isinstance(http_exc.detail, dict) else {
-                "error_code": http_exc.detail.error_code,
-                "message": http_exc.detail.message,
+            content={
+                "error_code": http_exc.status_code,
+                "message": str(http_exc.detail),
+                "detail": http_exc.detail,
+                "request_id": request_id
+            },
+            headers={
+                "Content-Type": "application/json",
+                "X-Request-ID": request_id
             }
         )
     except Exception as e:
-        logging.error(f"Exception: {e}")
-        # Unexpected error
+        logging.error(f"[{request_id}] Unexpected Exception: {str(e)}")
+        logging.error(f"[{request_id}] Traceback: {traceback.format_exc()}")
+        # Return JSON response for unexpected errors
         return JSONResponse(
             status_code=500,
             content={
-                "error_code": 500,
-                "message": str(e),  # or "Internal server error" for production
+                "error_code": "INTERNAL_SERVER_ERROR",
+                "message": "Internal server error",
+                "detail": str(e) if os.environ.get("DEBUG", "false").lower() == "true" else "An unexpected error occurred",
+                "request_id": request_id
+            },
+            headers={
+                "Content-Type": "application/json",
+                "X-Request-ID": request_id
             }
         )
 
