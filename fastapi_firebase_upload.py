@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Request, UploadFile, File, Header, Form
+from fastapi import FastAPI, HTTPException,Request, UploadFile, File, Header, Form
 from fastapi.responses import JSONResponse
+from fastapi.requests import Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from firebase_admin import credentials, initialize_app, auth
@@ -15,6 +16,7 @@ import re
 from errors  import raise_error
 import asyncio
 import sys
+import traceback
 
 # Configure logging to output to stderr (which systemd captures)
 logging.basicConfig(
@@ -26,6 +28,30 @@ logging.basicConfig(
 )
 
 app = FastAPI()
+
+@app.middleware("http")
+async def catch_exceptions_middleware(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except HTTPException as http_exc:
+        # Already well-structured FastAPI exception
+        return JSONResponse(
+            status_code=http_exc.status_code,
+            content=http_exc.detail if isinstance(http_exc.detail, dict) else {
+                "error_code": http_exc.detail.error_code,
+                "message": http_exc.detail.message,
+            }
+        )
+    except Exception as e:
+        # Unexpected error
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error_code": 500,
+                "message": str(e),  # or "Internal server error" for production
+            }
+        )
+
 
 # Enable CORS (optional for development)
 app.add_middleware(
