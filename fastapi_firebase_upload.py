@@ -465,33 +465,39 @@ async def count_media_files_in_dir(folder_path: str) -> int:
     media_files_count = 0
     for file_path in folder.iterdir():
         if file_path.is_file():
-            # Create a dummy UploadFile object for is_valid_media_type check
-            # This is a workaround as is_valid_media_type expects UploadFile.
-            # A more robust solution might refactor is_valid_media_type to take bytes/path.
             try:
-                # Read enough bytes for imghdr if it's an image
-                with open(file_path, "rb") as f:
-                    file_content_sample = f.read(512) # Read small sample for imghdr check
-                    f.seek(0) # Reset for potential full read if needed by future checks
+                # Check file extension first
+                ext = file_path.suffix.lower()
+                
+                # Determine content type based on extension
+                content_type = "application/octet-stream"
+                if ext in VALID_IMAGE_EXTENSIONS:
+                    if ext == '.jpg' or ext == '.jpeg':
+                        content_type = 'image/jpeg'
+                    elif ext == '.png':
+                        content_type = 'image/png'
+                    elif ext == '.gif':
+                        content_type = 'image/gif'
+                    elif ext == '.webp':
+                        content_type = 'image/webp'
+                elif ext in VALID_VIDEO_EXTENSIONS:
+                    if ext == '.mp4':
+                        content_type = 'video/mp4'
+                    elif ext == '.mov':
+                        content_type = 'video/quicktime'
+                    elif ext == '.avi':
+                        content_type = 'video/x-msvideo'
+                    elif ext == '.webm':
+                        content_type = 'video/webm'
+                    elif ext == '.mkv':
+                        content_type = 'video/x-matroska'
 
-                # Simulate UploadFile attributes
+                # Create UploadFile with proper content type in headers
                 temp_upload_file = UploadFile(
                     filename=file_path.name,
-                    file=file_path.open("rb"), # Pass actual file handle
-                    headers={"content-type": "application/octet-stream"} # Placeholder, will be determined by is_valid_media_type
+                    file=file_path.open("rb"),
+                    headers={"content-type": content_type}
                 )
-                
-                # Try to guess mime type to pass to is_valid_media_type for better check
-                # This is a simplification; in a real scenario, you might infer MIME from extension
-                # or use a library like python-magic. For now, we rely on suffix for `is_valid_media_type`'s logic.
-                ext = file_path.suffix.lower()
-                if ext in VALID_IMAGE_EXTENSIONS:
-                    temp_upload_file.content_type = VALID_IMAGE_MIMES[0] if '.jpeg' in VALID_IMAGE_EXTENSIONS else "image/jpeg" # Arbitrary default
-                elif ext in VALID_VIDEO_EXTENSIONS:
-                    temp_upload_file.content_type = VALID_VIDEO_MIMES[0] if '.mp4' in VALID_VIDEO_EXTENSIONS else "video/mp4" # Arbitrary default
-                else:
-                     # If neither, it's unlikely to be valid media for our purpose, but let is_valid_media_type decide
-                     temp_upload_file.content_type = "application/octet-stream"
 
                 is_valid, _ = await is_valid_media_type(temp_upload_file)
                 temp_upload_file.file.close() # Close the file handle
