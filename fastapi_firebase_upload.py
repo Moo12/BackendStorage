@@ -14,6 +14,16 @@ import logging
 import re
 from errors  import raise_error
 import asyncio
+import sys
+
+# Configure logging to output to stderr (which systemd captures)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stderr)
+    ]
+)
 
 app = FastAPI()
 
@@ -64,8 +74,8 @@ def get_credentials_path_for_domain(domain_name: str) -> str:
         if env_path:
             logging.info(f"Using environment variable {env_var_name} for domain {domain_name}: {env_path}")
             return env_path
-        else:
-            logging.info(f"Environment variable {env_var_name} not found for domain {domain_name}, using fallback")
+    else:
+        logging.warning(f"Environment variable {env_var_name} not found for domain {domain_name}, using fallback")
     
     # Fallback to default credentials
     default_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "./serviceAccountKey.json")
@@ -89,7 +99,7 @@ async def initialize_firebase_for_domain(domain_name: str): # Made async
     if not os.path.exists(cred_path):
         # Fallback to default credentials from env or generic path
         cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "./serviceAccountKey.json")
-        logging.info(f"Warning: Domain-specific credentials not found for {domain_name}, using default: {cred_path}")
+        logging.warning(f"Domain-specific credentials not found for {domain_name}, using default: {cred_path}")
         if not os.path.exists(cred_path):
             logging.error(f"Error: Default Firebase credential file not found at {cred_path}. Firebase initialization may fail.")
             # Depending on strictness, you might raise here, or let initialize_app fail
@@ -216,7 +226,7 @@ async def upload_site_image(
     # For site images, we don't use uid (None), only the relative_path
     upload_dir = get_file_path(request, None, relative_path)
 
-    logging.info(f"site image upload dir: {upload_dir}")
+    logging.info(f"Site image upload dir: {upload_dir}")
 
     saved_filename, media_type = await validate_and_save_media(file, upload_dir)
 
@@ -260,7 +270,7 @@ async def upload_image(
 
     upload_dir = get_file_path(request, uid, relative_path)
 
-    logger.info(f"upload dir {upload_dir}")
+    logging.info(f"Upload dir: {upload_dir}")
 
     MAX_IMAGES_PER_PATH = int(os.environ.get("MAX_IMAGES_PER_WISH", 5))
 
@@ -356,7 +366,7 @@ async def delete_image(
 
     file_path = get_file_path(request, uid, relative_path, filename)
 
-    logging.info(file_path)
+    logging.info(f"File path: {file_path}")
 
     remove_file(file_path)
 
@@ -566,8 +576,8 @@ async def authenticate_user(authorization: str, request: Request = None):
             # Re-initialize Firebase for this specific domain
             await initialize_firebase_for_domain(domain_name)
         except Exception as e:
-            logging.info(f"Warning: Could not initialize domain-specific Firebase for {domain_name}: {e}")
-            # Continue with existing Firebase instance
+                    logging.warning(f"Could not initialize domain-specific Firebase for {domain_name}: {e}")
+        # Continue with existing Firebase instance
 
     id_token = authorization.split("Bearer ")[1]
     try:
