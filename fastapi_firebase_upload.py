@@ -91,6 +91,9 @@ async def upload_site_image(
         request (Request): The incoming HTTP request.
         file (UploadFile): The uploaded image file.
         authorization (str): Authorization header with Firebase token.
+        
+    Form Data or Query Parameters (optional):
+        relative_path (str): Custom relative path for site images (defaults to "general")
 
     Returns:
         JSONResponse: Success status, filename, and URL of uploaded image.
@@ -98,25 +101,32 @@ async def upload_site_image(
     uid = authenticate_user(authorization)
 
     ensure_admin_role(uid)
+    
+    # Get all form data
+    form_data = await request.form()
+    # Access a specific field
+    relative_path = form_data.get("relative_path", "general")  # Default to "general" if not provided
+    
+    # For site images, we don't use uid (None), only the relative_path
+    upload_dir = get_file_path(request, None, relative_path)
 
-    general_dir = get_file_path(request, "general")
+    print(f"site image upload dir: {upload_dir}")
 
-    print(f"general dir {general_dir}")
+    saved_filename, media_type = await validate_and_save_media(file, upload_dir)
 
-    saved_filename, media_type = await validate_and_save_media(file, general_dir)
-
-    rel_dir = get_image_relative_dir(request, "general")
+    rel_dir = get_image_relative_dir(request, None, relative_path)
 
     return JSONResponse({
         "success": True,
         "filename": saved_filename,
         "url": f"/uploads/{rel_dir}/{saved_filename}",
+        "relative_path": relative_path
     })
 
 @app.post("/upload")
 async def upload_image(
     request: Request,
-    wish_id: str = Form(...),
+    relative_path: str = None,
     file: UploadFile = File(...),
     authorization: str = Header(None)
 ):
@@ -125,6 +135,7 @@ async def upload_image(
 
     Args:
         request (Request): The incoming HTTP request.
+        relative_path (str): The relative path within the user's directory (e.g., "wishes/wish123" or "blog/posts/2024/01").
         file (UploadFile): The uploaded image file.
         authorization (str): Authorization header with Firebase token.
 
@@ -135,27 +146,31 @@ async def upload_image(
 
     uid = authenticate_user(authorization)
 
-    wish_dir = get_file_path(request, uid, wish_id)
+    form_data = await request.form()
 
-    print(f"uid dir {wish_dir}")
+    relative_path = form_data.get("wish_id") or relative_path
 
-    MAX_IMAGES_PER_WISH = int(os.environ.get("MAX_IMAGES_PER_WISH", 5))
+    print(f"relative_path: {relative_path}")
 
-    if (await count_media_files_in_dir(wish_dir) >= MAX_IMAGES_PER_WISH):
+    upload_dir = get_file_path(request, uid, relative_path)
+
+    print(f"upload dir {upload_dir}")
+
+    MAX_IMAGES_PER_PATH = int(os.environ.get("MAX_IMAGES_PER_WISH", 5))
+
+    if (await count_media_files_in_dir(upload_dir) >= MAX_IMAGES_PER_PATH):
         raise_error("LIMIT_REACHED")
     
-    saved_filename, media_type = await validate_and_save_media(file, wish_dir)
+    saved_filename, media_type = await validate_and_save_media(file, upload_dir)
 
-
-
-    rel_dir = get_image_relative_dir(request, uid, wish_id)
+    rel_dir = get_image_relative_dir(request, uid, relative_path)
 
     return JSONResponse({
         "success": True,
         "filename": saved_filename,
         "uid": uid,
         "url": f"/uploads/{rel_dir}/{saved_filename}",  # This will be a direct link to the image
-        "max_images": MAX_IMAGES_PER_WISH
+        "max_images": MAX_IMAGES_PER_PATH
     })
 
 @app.delete("/delete-site-image")
@@ -164,27 +179,44 @@ async def delete_site_image(
     filename: str,
     authorization: str = Header(None)
 ):
+    """
+    Endpoint to delete a site-wide image, restricted to admins.
     
+    Args:
+        request (Request): The incoming HTTP request.
+        filename (str): Name of the file to delete.
+        authorization (str): Authorization header with Firebase token.
+        
+    Query Parameters (optional):
+        relative_path (str): Custom relative path for site images (defaults to "general")
+
+    Returns:
+        JSONResponse: Success status and deletion confirmation message.
+    """
     uid = authenticate_user(authorization)
 
     ensure_admin_role(uid)
     
-    file_path = get_file_path(request, "general", None, filename)
+    # Get relative_path from query parameters, default to "general"
+    relative_path = request.query_params.get("relative_path", "general")
+    
+    file_path = get_file_path(request, None, relative_path, filename)
 
-    logging.info(file_path)
+    logging.info(f"Deleting site image: {file_path}")
 
     remove_file(file_path)
 
     return JSONResponse({
         "success": True,
-        "message": f"File '{filename}' deleted successfully"
+        "message": f"File '{filename}' deleted successfully",
+        "relative_path": relative_path
     })
 
 
 @app.delete("/delete-image")
 async def delete_image(
     request: Request,
-    wish_id: str,
+    relative_path: str,
     filename: str,
     authorization: str = Header(None)
 ):
@@ -193,6 +225,7 @@ async def delete_image(
 
     Args:
         request (Request): The incoming HTTP request.
+        relative_path (str): The relative path within the user's directory.
         filename (str): Name of the file to delete.
         authorization (str): Authorization header with Firebase token.
 
@@ -201,7 +234,21 @@ async def delete_image(
     """
     uid = authenticate_user(authorization)
 
-    file_path = get_file_path(request, uid, wish_id, filename)
+    # Get form data and query parameters for backward compatibility
+    form_data = await request.form()
+    query_params = request.query_params
+    
+    # Priority: form data > query param > function arg > legacy wish_id > default
+    relative_path = (
+        form_data.get("relative_path") or 
+        query_params.get("relative_path") or 
+        relative_path or 
+        form_data.get("wish_id") or 
+        query_params.get("wish_id") or 
+        "general"
+    )
+
+    file_path = get_file_path(request, uid, relative_path, filename)
 
     logging.info(file_path)
 
@@ -254,7 +301,7 @@ async def is_valid_media_type(file: UploadFile) -> Tuple[bool, Optional[str]]:
         elif is_video_ext and not is_image_ext:
             media_category = 'video'
         else: # Still ambiguous or both (e.g., a file with '.mp4' extension but 'image/jpeg' MIME if spoofed)
-            logger.warning(f"Ambiguous media type for {file.filename}: MIME={mime}, Ext={ext}. Defaulting to None.")
+            print(f"Ambiguous media type for {file.filename}: MIME={mime}, Ext={ext}. Defaulting to None.")
             return (False, None) # Consider it invalid if truly ambiguous
     else: # MIME is not explicitly image or video
         # Try to infer from extension if MIME is generic or unknown
@@ -411,20 +458,20 @@ def authenticate_user(authorization: str):
     except Exception as e:
         raise_error("INVALID_TOKEN")
 
-def get_file_path(request: Request, uid: str, wish_id: str = None, filename: str = None):
+def get_file_path(request: Request, uid: str = None, relative_path: str = None, filename: str = None):
     """
     Construct the user's upload directory or full file path.
 
     Args:
         request (Request): Incoming HTTP request to get the domain name.
         uid (str): User ID.
-        wish_id: Wish Id
+        relative_path (str): The relative path within the user's directory.
         filename (str, optional): Specific filename to build full path.
 
     Returns:
         str: Path to user directory or to the specific file.
     """
-    base_path = Path(UPLOAD_DIR) / get_image_relative_dir(request, uid, wish_id)
+    base_path = Path(UPLOAD_DIR) / get_image_relative_dir(request, uid, relative_path)
 
     base_path.mkdir(parents=True, exist_ok=True)
 
@@ -434,15 +481,17 @@ def get_file_path(request: Request, uid: str, wish_id: str = None, filename: str
     print(f"path: {str(base_path)}")
     return str(base_path)
 
-def get_image_relative_dir(request: Request, uid: str, wish_id: str = None):
+def get_image_relative_dir(request: Request, uid: str, relative_path: str = None):
     domain_name = get_safe_domain_name(request)
 
-    relative_path = Path(domain_name) / Path(uid)
+    path = Path(domain_name)
+    if uid:
+        path = path / Path(uid)
 
-    if wish_id:
-        relative_path = relative_path / Path(wish_id)
+    if relative_path:
+        path = path / Path(relative_path)
 
-    return relative_path
+    return path
 
 def get_safe_domain_name(request: Request):
     domain_name = request.headers.get("host")
