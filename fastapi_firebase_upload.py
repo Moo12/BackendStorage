@@ -293,6 +293,8 @@ async def upload_site_image(
     Returns:
         JSONResponse: Success status, filename, and URL of uploaded image.
     """
+
+    logging.info("upload site image callback")
     uid = await authenticate_user(authorization, request)
 
     ensure_admin_role(uid)
